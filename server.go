@@ -64,6 +64,7 @@ func NewServer(addr string, maxClient uint, h Handler, protocol ConnProtocol, se
 		receiveLimit: ReceiveLimit,
 		wg:           &sync.WaitGroup{},
 		protocol:     protocol,
+		handler:      h,
 	}
 }
 
