@@ -39,7 +39,7 @@ func (s *Server) release() {
 	<-s.sem
 }
 
-func NewServer(addr string, maxClient uint, protocol ConnProtocol, sendLimit, receiveLimit uint) *Server {
+func NewServer(addr string, maxClient uint, h Handler, protocol ConnProtocol, sendLimit, receiveLimit uint) *Server {
 	MaxClient := maxClient
 	SendLimit := sendLimit
 	ReceiveLimit := receiveLimit
@@ -94,12 +94,10 @@ func (s *Server) start(l *net.TCPListener) {
 		}
 
 		s.acquire()
-		s.wg.Add(1)
 
 		go func() {
 			conn := newConn(rawConn, s.sendLimit, s.receiveLimit)
 			s.serveConn(conn)
-			s.wg.Done()
 		}()
 	}
 }
@@ -115,9 +113,89 @@ func (s *Server) serveConn(c *Conn) {
 		log.Print("srv on connect fail")
 		return
 	}
-	c.initFunc(c.read)
-	c.initFunc(c.write)
-	c.initFunc(c.handle)
+	s.wrapLoop(c, s.readLoop)
+	s.wrapLoop(c, s.writeLoop)
+	s.wrapLoop(c, s.handleLoop)
+	c.wg.Wait()
+}
+
+func (s *Server) readLoop(c *Conn) {
+	for {
+		select {
+		case <-c.closeCh:
+			return
+		default:
+		}
+		p, err := c.protocol.ReadConnPacket(c.rawConn)
+		if err != nil {
+			log.Printf("error read conn packet:%s\n", err.Error())
+			return
+		}
+		c.receiveCh <- p
+	}
+}
+
+func (s *Server) writeLoop(c *Conn) {
+	for {
+		select {
+		case <-c.closeCh:
+			return
+		case p, ok := <-c.sendCh:
+			if c.Closed() {
+				return
+			}
+			if !ok {
+				return
+			}
+			if _, err := write(c.rawConn, p.Serialize()); err != nil {
+				log.Printf("error write:%s\n", err.Error())
+				return
+			}
+		}
+	}
+
+}
+
+func (s *Server) handleLoop(c *Conn) {
+	for {
+		select {
+		case <-c.closeCh:
+			return
+		case p, ok := <-c.receiveCh:
+			if !ok {
+				return
+			}
+			s.handleMsg(c, p)
+		}
+	}
+}
+
+func (s *Server) handleMsg(c *Conn, p ConnPacket) {
+	defer func() {
+		if ex := recover(); ex != nil {
+			log.Printf("handler message exception:%v\n", ex)
+		}
+	}()
+
+	if c.Closed() {
+		return
+	}
+	s.handler.OnMessage(c, p)
+
+}
+
+func (s *Server) wrapLoop(c *Conn, fnc func(*Conn)) {
+	c.wg.Add(1)
+	go func() {
+		defer func() {
+			if ex := recover(); ex != nil {
+				log.Printf("wrap func exception:%v\n", ex)
+			}
+			c.Close()
+			c.wg.Done()
+		}()
+		fnc(c)
+	}()
 }
 
 func (s *Server) Serve() {
@@ -145,5 +223,4 @@ func (s *Server) Serve() {
 	sig := <-chSig
 	log.Printf("receive signal:%v\n", sig)
 	s.Stop()
-
 }
