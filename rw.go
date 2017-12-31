@@ -13,32 +13,33 @@ func (c *Conn) AsyncWrite(p ConnPacket, deadline time.Duration) error {
 	var err error
 	defer func() {
 		if ex := recover(); ex != nil {
-			log.Printf("AsyncWrite:%v\n", ex)
+			log.Printf("AsyncWrite:exception:%v\n", ex)
+			DumpStack()
 			err = ErrConnClosed
 		}
 	}()
 
 	if deadline != 0 {
-		for {
-			select {
-			case c.sendCh <- p:
-				return nil
-			case <-c.closeCh:
-				return ErrConnClosed
-			case <-time.After(deadline):
-				return ErrWriteTimeout
-			}
+		select {
+		case <-c.closeCh:
+			return ErrConnClosed
+		case <-time.After(deadline):
+			return ErrWriteTimeout
+		case c.sendCh <- p:
+			return nil
+		default:
 		}
+
 	} else {
-		for {
-			select {
-			case c.sendCh <- p:
-				return nil
-			default:
-				return ErrWriteBlocking
-			}
+		select {
+		case <-c.closeCh:
+			return ErrConnClosed
+		case c.sendCh <- p:
+			return nil
+		default:
 		}
 	}
+	return nil
 }
 
 //同步写

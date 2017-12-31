@@ -12,8 +12,7 @@ import (
 type Server struct {
 	addr    string
 	handler Handler
-
-	wg *sync.WaitGroup
+	wg      *sync.WaitGroup
 
 	readTimeout   time.Duration
 	writeTimeout  time.Duration
@@ -23,7 +22,8 @@ type Server struct {
 	sendLimit    uint
 	receiveLimit uint
 	//客户端连接数限制
-	maxClient uint
+	maxClient   uint
+	releaseOnce sync.Once
 
 	exitCh chan struct{}
 	sem    chan struct{}
@@ -36,7 +36,9 @@ func (s *Server) acquire() {
 }
 
 func (s *Server) release() {
-	<-s.sem
+	s.releaseOnce.Do(func() {
+		<-s.sem
+	})
 }
 
 func NewServer(addr string, maxClient uint, h Handler, protocol ConnProtocol, sendLimit, receiveLimit uint) *Server {
@@ -62,17 +64,16 @@ func NewServer(addr string, maxClient uint, h Handler, protocol ConnProtocol, se
 		exitCh:       make(chan struct{}),
 		sendLimit:    SendLimit,
 		receiveLimit: ReceiveLimit,
-		wg:           &sync.WaitGroup{},
+		releaseOnce:  sync.Once{},
 		protocol:     protocol,
 		handler:      h,
+		wg:           &sync.WaitGroup{},
 	}
 }
 
 func (s *Server) start(l *net.TCPListener) {
-	s.wg.Add(1)
 	defer func() {
 		l.Close()
-		s.wg.Done()
 	}()
 
 	for {
@@ -90,7 +91,8 @@ func (s *Server) start(l *net.TCPListener) {
 		l.SetDeadline(time.Now().Add(s.acceptTimeout))
 
 		rawConn, err := l.AcceptTCP()
-		if err != nil {
+
+		if err != nil || rawConn == nil {
 			continue
 		}
 
@@ -98,6 +100,8 @@ func (s *Server) start(l *net.TCPListener) {
 
 		go func() {
 			conn := newConn(rawConn, s.sendLimit, s.receiveLimit)
+			conn.handler = s.handler
+			conn.protocol = s.protocol
 			s.serveConn(conn)
 		}()
 	}
@@ -106,7 +110,6 @@ func (s *Server) start(l *net.TCPListener) {
 func (s *Server) Stop() {
 	log.Print("server stop")
 	s.exitCh <- struct{}{}
-	s.wg.Wait()
 }
 
 func (s *Server) serveConn(c *Conn) {
@@ -114,23 +117,24 @@ func (s *Server) serveConn(c *Conn) {
 		log.Print("srv on connect fail")
 		return
 	}
+	s.wg.Add(3)
 	s.wrapLoop(c, s.readLoop)
 	s.wrapLoop(c, s.writeLoop)
 	s.wrapLoop(c, s.handleLoop)
-	c.wg.Wait()
+	s.wg.Wait()
 }
 
 func (s *Server) readLoop(c *Conn) {
 	for {
 		select {
 		case <-c.closeCh:
+			s.release()
 			return
 		default:
 		}
-		p, err := c.protocol.ReadConnPacket(c.rawConn)
-		if err != nil {
-			log.Printf("error read conn packet:%s\n", err.Error())
-			return
+		p, err := s.protocol.ReadConnPacket(c.rawConn)
+		if err != nil || p == nil {
+			continue
 		}
 		c.receiveCh <- p
 	}
@@ -140,17 +144,18 @@ func (s *Server) writeLoop(c *Conn) {
 	for {
 		select {
 		case <-c.closeCh:
+			s.release()
 			return
 		case p, ok := <-c.sendCh:
 			if c.Closed() {
 				return
 			}
 			if !ok {
-				return
+				continue
 			}
 			if _, err := write(c.rawConn, p.Serialize()); err != nil {
 				log.Printf("error write:%s\n", err.Error())
-				return
+				continue
 			}
 		}
 	}
@@ -161,10 +166,11 @@ func (s *Server) handleLoop(c *Conn) {
 	for {
 		select {
 		case <-c.closeCh:
+			s.release()
 			return
 		case p, ok := <-c.receiveCh:
 			if !ok {
-				return
+				continue
 			}
 			s.handleMsg(c, p)
 		}
@@ -173,12 +179,15 @@ func (s *Server) handleLoop(c *Conn) {
 
 func (s *Server) handleMsg(c *Conn, p ConnPacket) {
 	defer func() {
+
 		if ex := recover(); ex != nil {
-			log.Printf("handler message exception:%v\n", ex)
+			log.Printf("handleMsg:exception:%v\n", ex)
+			DumpStack()
 		}
 	}()
 
 	if c.Closed() {
+		s.release()
 		return
 	}
 	s.handler.OnMessage(c, p)
@@ -186,14 +195,13 @@ func (s *Server) handleMsg(c *Conn, p ConnPacket) {
 }
 
 func (s *Server) wrapLoop(c *Conn, fnc func(*Conn)) {
-	c.wg.Add(1)
 	go func() {
 		defer func() {
 			if ex := recover(); ex != nil {
-				log.Printf("wrap func exception:%v\n", ex)
+				DumpStack()
 			}
 			c.Close()
-			c.wg.Done()
+			s.wg.Done()
 		}()
 		fnc(c)
 	}()

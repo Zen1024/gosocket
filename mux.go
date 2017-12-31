@@ -9,22 +9,22 @@ type HandleFunc func(*Conn, ConnPacket)
 
 type Mux struct {
 	sync.RWMutex
-	m map[int]*muxObj
+	m map[int32]*muxObj
 }
 
 type muxObj struct {
 	Handle HandleFunc
 	Name   string
-	Id     int
+	Id     int32
 }
 
 func NewMux() *Mux {
 	return &Mux{
-		m: make(map[int]*muxObj),
+		m: make(map[int32]*muxObj),
 	}
 }
 
-func (m *Mux) Add(id int, name string, handle HandleFunc) error {
+func (m *Mux) Add(id int32, name string, handle HandleFunc) error {
 	m.Lock()
 	defer m.Unlock()
 	if _, ok := m.m[id]; ok {
@@ -38,7 +38,7 @@ func (m *Mux) Add(id int, name string, handle HandleFunc) error {
 	return nil
 }
 
-func (m *Mux) GetMuxObj(id int) *muxObj {
+func (m *Mux) GetMuxObj(id int32) *muxObj {
 	m.Lock()
 	defer m.Unlock()
 	if obj, ok := m.m[id]; ok {

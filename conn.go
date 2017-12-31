@@ -17,7 +17,6 @@ type ConnProtocol interface {
 type Conn struct {
 	addr string
 	mu   sync.Mutex
-	wg   *sync.WaitGroup
 
 	rawConn *net.TCPConn
 
@@ -70,7 +69,9 @@ func (c *Conn) Close() error {
 	defer c.mu.Unlock()
 	defer func() {
 		if ex := recover(); ex != nil {
-			log.Printf("close error:%v\n", ex)
+			if ex := recover(); ex != nil {
+				DumpStack()
+			}
 		}
 	}()
 
