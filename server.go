@@ -198,6 +198,7 @@ func (s *Server) wrapLoop(c *Conn, fnc func(*Conn)) {
 	go func() {
 		defer func() {
 			if ex := recover(); ex != nil {
+				log.Printf("wrapLoop exception:%v\n", ex)
 				DumpStack()
 			}
 			c.Close()
@@ -213,7 +214,7 @@ func (s *Server) Serve() {
 		addr = ":10000"
 	}
 
-	tcpaddr, err := net.ResolveTCPAddr("tcp4", addr)
+	tcpaddr, err := net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
 		log.Printf("resolve tcp addr error:%s\n", err.Error())
 		return
